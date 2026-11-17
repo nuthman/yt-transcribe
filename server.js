@@ -129,13 +129,40 @@ const readBody = (req) => new Promise((ok, no) => {
   req.on('error', no);
 });
 
-const SYSTEM = `You clean up speech transcripts. The input is raw text from a spoken video, often without punctuation.
-Rewrite it as clean, readable prose:
-- Remove filler words and sounds (um, uh, ah, er, like, you know) and false starts.
-- Where the speaker stumbles, repeats, or corrects themselves, keep only the corrected, intended wording.
-- Fix obvious mis-heard words, punctuation, capitalization and sentence boundaries.
-- Do NOT summarize, add information, or change the meaning. Keep the speaker's voice and all substantive content.
-- Output ONLY the cleaned text, with blank lines between paragraphs. No preamble.`;
+const SYSTEM = `You are a transcript copy-editor. The input is raw text from a spoken video, often without punctuation.
+Your job is to clean it, NOT to shorten it. The output must be almost as long as the input.
+- Keep EVERY sentence, idea, example, name, number and joke. Never summarize, condense, merge points, or skip anything.
+- Only remove: filler sounds and words (um, uh, ah, er), accidental repeated words, and false starts where the speaker restarts a sentence (keep the corrected version).
+- Fix obvious mis-heard words, punctuation, capitalization and sentence boundaries. Keep the speaker's own wording and voice otherwise.
+- Output ONLY the cleaned text, with blank lines between paragraphs. No preamble, no notes.`;
+
+const bearer = (k) => (k ? { Authorization: 'Bearer ' + k } : {});
+
+// Normalizes a user-pasted OpenAI-compatible base URL (e.g. https://host/v1).
+function customBase(raw) {
+  let u;
+  try { u = new URL(String(raw).trim()); } catch { throw Object.assign(new Error('That is not a valid URL.'), { status: 400 }); }
+  if (!/^https?:$/.test(u.protocol)) throw Object.assign(new Error('The endpoint must start with http:// or https://'), { status: 400 });
+  return (u.origin + u.pathname).replace(/\/+$/, '').replace(/\/(chat\/completions|models)$/, '');
+}
+
+async function listCustom(raw, key) {
+  let base;
+  try { base = customBase(raw); } catch (e) { return { ok: false, error: e.message }; }
+  const candidates = /\/v\d+$/.test(base) ? [base] : [base, base + '/v1'];
+  let lastErr = 'no response';
+  for (const b of candidates) {
+    try {
+      const r = await fetch(b + '/models', { headers: bearer(key), signal: AbortSignal.timeout(8000) });
+      if (r.status === 401 || r.status === 403) return { ok: false, error: `The endpoint rejected the API key (HTTP ${r.status}).` };
+      if (!r.ok) { lastErr = 'HTTP ' + r.status; continue; }
+      const j = await r.json();
+      const models = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
+      return { ok: true, base: b, models };
+    } catch (e) { lastErr = e.message; }
+  }
+  return { ok: false, error: `Could not list models at ${base} (${lastErr}).` };
+}
 
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
@@ -157,6 +184,7 @@ async function handle(req, res) {
         if (r.status === 401 || r.status === 403) out.omlx.needsKey = true;
         else out.omlx.models = ((await r.json()).data || []).map((m) => m.id);
       } catch {}
+      if (req.headers['x-endpoint-url']) out.custom = await listCustom(req.headers['x-endpoint-url'], req.headers['x-endpoint-key'] || '');
       return json(res, 200, out);
     }
     if (url.pathname === '/api/clean' && req.method === 'POST') {
@@ -164,15 +192,20 @@ async function handle(req, res) {
       const [backend, ...rest] = String(model).split(':');
       const name = rest.join(':');
       const messages = [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }];
-      if (backend === 'omlx') {
-        const key = req.headers['x-omlx-key'] || process.env.OMLX_API_KEY || '';
-        const up = await fetch(OMLX + '/v1/chat/completions', {
+      if (backend === 'omlx' || backend === 'custom') {
+        const custom = backend === 'custom';
+        const base = custom ? customBase(req.headers['x-endpoint-url']) : OMLX + '/v1';
+        const key = custom ? req.headers['x-endpoint-key'] || '' : req.headers['x-omlx-key'] || process.env.OMLX_API_KEY || '';
+        const body = { model: name, messages, stream: false };
+        if (!custom) body.temperature = 0.1; // some hosted models reject non-default values
+        const up = await fetch(base + '/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
-          body: JSON.stringify({ model: name, messages, temperature: 0.1, stream: false }),
+          headers: { 'Content-Type': 'application/json', ...bearer(key) },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(300000),
         });
-        const j = await up.json();
-        if (!up.ok) return json(res, 502, { error: j.error?.message || 'oMLX error' });
+        const j = await up.json().catch(() => ({}));
+        if (!up.ok) return json(res, 502, { error: j.error?.message || `${custom ? 'Endpoint' : 'oMLX'} error (HTTP ${up.status})` });
         return json(res, 200, { text: stripThink(j.choices?.[0]?.message?.content) });
       }
       const up = await fetch(OLLAMA + '/api/chat', {

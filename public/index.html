@@ -24,7 +24,7 @@
   #status.err { color:#dc2626 }
   .bar { display:flex; justify-content:space-between; align-items:center; margin:18px 0 8px }
   textarea { width:100%; min-height:420px; padding:14px; border:1px solid var(--bd); border-radius:10px; background:var(--card); color:var(--fg); font:14px/1.6 ui-monospace,Menlo,monospace; resize:vertical }
-  .hide { display:none }
+  .hide { display:none !important }
 </style>
 </head>
 <body>
@@ -47,12 +47,29 @@
         </select>
       </label>
       <label class="hide" id="modelWrap">Model <select id="model"></select></label>
+      <label class="hide" id="chunkWrap">Send <select id="chunking"><option value="auto">in chunks (auto)</option><option value="whole">whole transcript at once</option></select></label>
       <label><input type="checkbox" id="ts"> Timestamps</label>
       <label class="hide" id="langWrap">Language <select id="lang"></select></label>
     </div>
     <div class="row hide" id="keyWrap">
       <label>oMLX API key <input type="password" id="key" placeholder="paste key" autocomplete="off"></label>
       <small>Stored only in this browser; sent to your local server.</small>
+    </div>
+    <div class="row">
+      <button type="button" id="epBtn">Custom API endpoint…</button>
+      <small id="epState"></small>
+    </div>
+    <div class="hide" id="epPanel" style="display:grid;gap:8px">
+      <div class="row">
+        <input type="text" id="epUrl" placeholder="https://api.example.com/v1" style="flex:1;min-width:240px" autocomplete="off" spellcheck="false">
+        <input type="password" id="epKey" placeholder="API key (if required)" autocomplete="off">
+      </div>
+      <div class="row">
+        <button type="button" class="primary" id="epConnect">Connect &amp; list models</button>
+        <button type="button" id="epRemove">Remove</button>
+        <button type="button" id="epFree" title="Keyless public service; your transcript text is sent to it">Use free public model (no key)</button>
+        <small>Any OpenAI-compatible server (<code>/v1/models</code> and <code>/v1/chat/completions</code>). The URL and key are kept in this browser only.</small>
+      </div>
     </div>
     <small id="backendNote"></small>
   </div>
@@ -75,32 +92,48 @@
 const $ = (id) => document.getElementById(id);
 const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : 'mut'; };
 const store = { get: (k) => { try { return localStorage.getItem(k) } catch { return null } }, set: (k, v) => { try { localStorage.setItem(k, v) } catch {} } };
+const ep = { url: store.get('epUrl') || '', key: store.get('epKey') || '', base: store.get('epBase') || '' };
+function hdrs() {
+  const h = {}, k = $('key').value.trim();
+  if (k) h['X-Omlx-Key'] = k;
+  if (ep.url) { h['X-Endpoint-Url'] = ep.base || ep.url; if (ep.key) h['X-Endpoint-Key'] = ep.key; }
+  return h;
+}
+const isLocal = (u) => { try { const h = new URL(u).hostname; return /^(localhost|127\.|\[::1\]|.*\.local$)/.test(h); } catch { return true; } };
 let data = null, rawText = null, cleanedBlocks = null, running = 0;
 
 $('key').value = store.get('omlxKey') || '';
 $('mode').value = store.get('mode') || 'quick';
 $('ts').checked = store.get('ts') === '1';
+$('chunking').value = store.get('chunking') || 'auto';
 
 // ---------- models ----------
 async function loadModels() {
-  const key = $('key').value.trim();
-  const r = await (await fetch('/api/models', { headers: key ? { 'X-Omlx-Key': key } : {} })).json();
+  const r = await (await fetch('/api/models', { headers: hdrs() })).json();
   const sel = $('model'), prev = store.get('model');
   sel.innerHTML = '';
   const add = (backend, names) => names.forEach((n) => {
     const o = document.createElement('option'); o.value = backend + ':' + n; o.textContent = `${n} (${backend})`; sel.append(o);
   });
   const chat = (n) => !/embed|rerank|midi/i.test(n);
-  add('omlx', r.omlx.models.filter(chat)); add('ollama', r.ollama.models.filter(chat));
+  add('custom', (r.custom?.models || []).filter(chat)); add('omlx', r.omlx.models.filter(chat)); add('ollama', r.ollama.models.filter(chat));
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   $('keyWrap').classList.toggle('hide', !r.omlx.needsKey);
   const notes = [];
+  if (r.custom) {
+    if (r.custom.ok) {
+      ep.base = r.custom.base; store.set('epBase', ep.base);
+      let host = ''; try { host = new URL(ep.base).host; } catch {}
+      $('epState').textContent = `Connected to ${host} · ${r.custom.models.length} models` + (isLocal(ep.base) ? '' : ' · transcript text is sent to this server');
+      $('epState').className = 'mut';
+    } else { $('epState').textContent = r.custom.error; $('epState').className = 'err'; }
+  } else $('epState').textContent = '';
   if (r.omlx.needsKey) notes.push('oMLX is running but needs an API key.');
   if (!sel.options.length) notes.push('No local model found. Start oMLX or Ollama for AI polish.');
   $('backendNote').textContent = notes.join(' ');
   updateModelUI();
 }
-function updateModelUI() { $('modelWrap').classList.toggle('hide', $('mode').value !== 'ai' || !$('model').options.length); }
+function updateModelUI() { const ai = $('mode').value === 'ai'; $('modelWrap').classList.toggle('hide', !ai || !$('model').options.length); $('chunkWrap').classList.toggle('hide', !ai); }
 
 // ---------- quick cleanup (rule based) ----------
 function quickClean(t) {
@@ -139,7 +172,7 @@ function render() {
   if (!data) return;
   const blocks = cleanedBlocks || rawBlocks();
   const lines = [`# ${data.title}`, ''];
-  lines.push(`**Channel:** ${data.author || 'unknown'} · **Source:** https://youtu.be/${data.videoId} · **Captions:** ${data.languageName}${data.auto ? ' (auto-generated)' : ''}`, '');
+  lines.push(`**Channel:** ${data.author || 'unknown'} · **Source:** https://youtu.be/${data.videoId} · **Captions:** ${data.languageName}${data.auto && !/auto/i.test(data.languageName) ? ' (auto-generated)' : ''}`, '');
   for (const b of blocks) lines.push((($('ts').checked) ? `**[${fmt(b.start)}]** ` : '') + b.text, '');
   $('md').value = lines.join('\n').trim() + '\n';
   $('meta').textContent = data.title;
@@ -150,19 +183,52 @@ function rawBlocks() {
   return paragraphs(data.segments).map((p) => ({ start: p.start, text: mode === 'off' ? p.text : quickClean(p.text) }));
 }
 
-async function polish(blocks, model) {
-  const groups = chunk(blocks), result = [];
-  for (let i = 0; i < groups.length; i++) {
-    status(`AI polish: part ${i + 1} of ${groups.length}…`);
-    const key = $('key').value.trim();
-    const r = await fetch('/api/clean', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { 'X-Omlx-Key': key } : {}) }, body: JSON.stringify({ model, text: groups[i].map((b) => b.text).join('\n\n') }) });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const wordCount = (t) => (t.match(/\S+/g) || []).length;
+// true when the text ends a sentence ("...", "…" and trailing commas do not count)
+function endsSentence(t) {
+  t = t.trim().replace(/["'”’)\]]+$/, '');
+  return /[.!?]$/.test(t) && !/\.\.\.$/.test(t);
+}
+
+async function askModel(model, text, label) {
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch('/api/clean', { method: 'POST', headers: { 'Content-Type': 'application/json', ...hdrs() }, body: JSON.stringify({ model, text }) });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Model error');
-    const parts = j.text.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+    if (r.ok) return j.text;
+    const msg = j.error || 'Model error';
+    if (attempt < 3 && /rate|limit|retry after|429/i.test(msg)) {   // free tiers: wait, then try again
+      const secs = Math.min(+(msg.match(/retry after (\d+)\s*s/i) || [])[1] + 2 || 46, 120);
+      for (let s = secs; s > 0; s--) { status(`${label} — rate limited, retrying in ${s}s…`); await sleep(1000); }
+      continue;
+    }
+    throw new Error(msg);
+  }
+}
+
+async function polish(blocks, model) {
+  // Custom endpoints get larger chunks (fewer rate-limited calls); local small models get small ones.
+  const max = $('chunking').value === 'whole' ? Infinity : model.startsWith('custom:') ? 3500 : 1800;
+  const groups = chunk(blocks, max), result = [];
+  let carry = ''; // unfinished sentence at the end of the previous chunk, re-sent with the next one
+  for (let i = 0; i < groups.length; i++) {
+    const label = groups.length === 1 ? 'AI polish' : `AI polish: part ${i + 1} of ${groups.length}`;
+    status(label + '…');
+    const input = (carry ? carry + ' ' : '') + groups[i].map((b) => b.text).join('\n\n');
+    carry = '';
+    const out = await askModel(model, input, label);
+    const parts = out.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+    if (i < groups.length - 1 && parts.length && !endsSentence(parts.at(-1))) {
+      const last = parts.pop();
+      const m = [...last.matchAll(/[.!?]["”')\]]*\s+/g)].filter((x) => !/^\.\.\./.test(last.slice(x.index - 2, x.index + 1))).pop();
+      if (m) { parts.push(last.slice(0, m.index + m[0].length).trim()); carry = last.slice(m.index + m[0].length).trim(); }
+      else carry = last;
+    }
     const startT = groups[i][0].start, endT = groups[i].at(-1).start;
     parts.forEach((p, k) => result.push({ start: parts.length > 1 ? startT + (endT - startT) * k / (parts.length - 1) : startT, text: p }));
     cleanedBlocks = [...result]; render();
   }
+  if (carry) result.push({ start: groups.at(-1).at(-1).start, text: carry });
   return result;
 }
 
@@ -175,13 +241,17 @@ async function run(lang) {
     const j = await r.json(); if (!r.ok) throw new Error(j.error);
     if (id !== running) return;
     data = j;
-    $('lang').innerHTML = j.tracks.map((t) => `<option value="${t.code}">${t.name}${t.auto ? ' (auto)' : ''}</option>`).join('');
+    $('lang').innerHTML = j.tracks.map((t) => `<option value="${t.code}">${t.name}${t.auto && !/auto/i.test(t.name) ? ' (auto)' : ''}</option>`).join('');
     $('lang').value = j.language; $('langWrap').classList.toggle('hide', j.tracks.length < 2);
     render(); status(`${j.segments.length} caption lines loaded.`);
     if ($('mode').value === 'ai' && $('model').value) {
       cleanedBlocks = [];
       const out = await polish(rawBlocks(), $('model').value);
-      if (id === running) { cleanedBlocks = out; render(); status('Done — AI polished.'); }
+      if (id === running) {
+        cleanedBlocks = out; render();
+        const kept = wordCount(out.map((b) => b.text).join(' ')) / Math.max(1, wordCount(rawBlocks().map((b) => b.text).join(' ')));
+        status(kept < 0.75 ? `Done, but the model returned only ${Math.round(kept * 100)}% of the words. It may have dropped content; compare with Quick mode.` : 'Done — AI polished.', kept < 0.75);
+      }
     } else status('Done.');
   } catch (e) {
     status(e.message, true);
@@ -192,6 +262,7 @@ async function run(lang) {
 $('form').addEventListener('submit', (e) => { e.preventDefault(); run(); });
 $('lang').addEventListener('change', () => run($('lang').value));
 $('mode').addEventListener('change', () => { store.set('mode', $('mode').value); updateModelUI(); cleanedBlocks = null; render(); });
+$('chunking').addEventListener('change', () => store.set('chunking', $('chunking').value));
 $('model').addEventListener('change', () => store.set('model', $('model').value));
 $('ts').addEventListener('change', () => { store.set('ts', $('ts').checked ? '1' : '0'); render(); });
 $('key').addEventListener('change', () => { store.set('omlxKey', $('key').value.trim()); loadModels(); });
@@ -203,6 +274,25 @@ $('dl').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([$('md').value], { type: 'text/markdown' }));
   a.download = (data?.title || 'transcript').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') + '.md'; a.click();
+});
+$('epUrl').value = ep.url; $('epKey').value = ep.key;
+$('epBtn').addEventListener('click', () => $('epPanel').classList.toggle('hide'));
+$('epConnect').addEventListener('click', async () => {
+  ep.url = $('epUrl').value.trim(); ep.key = $('epKey').value.trim(); ep.base = '';
+  store.set('epUrl', ep.url); store.set('epKey', ep.key); store.set('epBase', '');
+  if (!ep.url) { $('epState').textContent = 'Paste an endpoint URL first.'; $('epState').className = 'err'; return; }
+  $('epState').textContent = 'Connecting…'; $('epState').className = 'mut';
+  await loadModels();
+  const first = [...$('model').options].find((o) => o.value.startsWith('custom:'));
+  if (first) { $('model').value = first.value; store.set('model', first.value); $('mode').value = 'ai'; store.set('mode', 'ai'); updateModelUI(); $('epPanel').classList.add('hide'); }
+});
+$('epFree').addEventListener('click', () => {
+  if (!confirm('This sends your transcript text to a free third-party service (pollinations.ai). Fine for public videos; do not use it for anything private. Continue?')) return;
+  $('epUrl').value = 'https://text.pollinations.ai/openai'; $('epKey').value = ''; $('epConnect').click();
+});
+$('epRemove').addEventListener('click', () => {
+  ep.url = ep.key = ep.base = ''; ['epUrl', 'epKey', 'epBase'].forEach((k) => store.set(k, ''));
+  $('epUrl').value = $('epKey').value = ''; loadModels();
 });
 loadModels();
 </script>
