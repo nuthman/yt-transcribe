@@ -8,7 +8,7 @@ import path from 'node:path';
 const PORT = Number(process.env.PORT || 3000);
 const OLLAMA = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
 const OMLX = process.env.OMLX_HOST || 'http://127.0.0.1:8888';
-const stripThink = (t) => String(t || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+export const stripThink = (t) => String(t || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 const CLIENTS = [
@@ -79,7 +79,7 @@ export function parseTimedText(xml) {
   return out;
 }
 
-async function getTranscript(input, lang) {
+export async function getTranscript(input, lang) {
   const id = parseVideoId(input);
   if (!id) throw Object.assign(new Error('That does not look like a YouTube URL or video ID.'), { status: 400 });
   const { player, ua } = await getPlayer(id);
@@ -129,7 +129,7 @@ const readBody = (req) => new Promise((ok, no) => {
   req.on('error', no);
 });
 
-const SYSTEM = `You are a transcript copy-editor. The input is raw text from a spoken video, often without punctuation.
+export const SYSTEM = `You are a transcript copy-editor. The input is raw text from a spoken video, often without punctuation.
 Your job is to clean it, NOT to shorten it. The output must be almost as long as the input.
 - Keep EVERY sentence, idea, example, name, number and joke. Never summarize, condense, merge points, or skip anything.
 - Only remove: filler sounds and words (um, uh, ah, er), accidental repeated words, and false starts where the speaker restarts a sentence (keep the corrected version).
@@ -139,7 +139,7 @@ Your job is to clean it, NOT to shorten it. The output must be almost as long as
 const bearer = (k) => (k ? { Authorization: 'Bearer ' + k } : {});
 
 // Normalizes a user-pasted OpenAI-compatible base URL (e.g. https://host/v1).
-function customBase(raw) {
+export function customBase(raw) {
   let u;
   try { u = new URL(String(raw).trim()); } catch { throw Object.assign(new Error('That is not a valid URL.'), { status: 400 }); }
   if (!/^https?:$/.test(u.protocol)) throw Object.assign(new Error('The endpoint must start with http:// or https://'), { status: 400 });

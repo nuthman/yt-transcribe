@@ -12,6 +12,36 @@ node server.js
 
 Open http://localhost:3000, paste a YouTube link, and click **Transcribe**.
 
+## Command line
+
+Get a markdown file straight from a URL, no browser needed:
+
+```bash
+node cli.js https://youtu.be/jNQXAC9IVRw          # writes Me-at-the-zoo.md in the current folder
+node cli.js <url> -q -t -o notes.md               # quick cleanup + timestamps, custom file name
+node cli.js <url> --stdout > transcript.md        # print instead of writing a file
+node cli.js <url> --langs                         # list available caption languages
+```
+
+To use it as a `yt-transcribe` command anywhere, run `npm link` once in this folder.
+
+Like the web app, it makes no AI calls unless you ask. Options:
+
+| Option | What it does |
+| --- | --- |
+| `-o, --output <file>` | Write to this file (overwrites). `-` means stdout. By default the file is named after the video title and never overwrites an existing file. |
+| `--stdout` | Print the markdown instead of writing a file |
+| `-t, --timestamps` | Add `[mm:ss]` timestamps to each paragraph |
+| `-l, --lang <code>` | Caption language (default: best English track) |
+| `-q, --quick` | Remove ums, ahs, `[Music]` tags and stutters (no AI) |
+| `--ai --model <name>` | AI polish with an Ollama model |
+| `--ai --endpoint <url> --model <name>` | AI polish with any OpenAI-compatible server (base URL such as `http://127.0.0.1:8888/v1`) |
+| `--key <key>` | API key for the endpoint. Safer: set the `YT_TRANSCRIBE_KEY` environment variable |
+| `--free` | AI polish with the free keyless public model (text is sent to pollinations.ai) |
+| `--whole` | Send the whole transcript in one request instead of chunks |
+
+Progress and warnings go to stderr, so `--stdout` output stays clean for piping. The exit code is non-zero on errors.
+
 ## How it works
 
 1. **Fetch**: the local server asks YouTube for the video's caption track (manual or auto-generated) and parses it into timed lines. No audio or video is downloaded.
@@ -42,4 +72,6 @@ Other settings: `PORT` changes the server port (default 3000).
 ## Files
 
 - `server.js`: HTTP server, caption fetching and parsing, model proxy.
-- `public/index.html`: the whole UI.
+- `cli.js`: command-line interface.
+- `public/index.html`: the web UI.
+- `public/format.js`: cleanup rules and markdown building, shared by the web UI and the CLI.

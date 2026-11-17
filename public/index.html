@@ -88,7 +88,8 @@
   </section>
 </main>
 
-<script>
+<script type="module">
+import { quickClean, fmt, paragraphs, chunk, endsSentence, wordCount, toBlocks, buildMarkdown } from './format.js';
 const $ = (id) => document.getElementById(id);
 const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : 'mut'; };
 const store = { get: (k) => { try { return localStorage.getItem(k) } catch { return null } }, set: (k, v) => { try { localStorage.setItem(k, v) } catch {} } };
@@ -141,61 +142,16 @@ async function loadModels() {
 }
 function updateModelUI() { $('modelWrap').classList.toggle('hide', !$('model').options.length); refreshAiBtn(); }
 
-// ---------- quick cleanup (rule based) ----------
-function quickClean(t) {
-  return t
-    .replace(/\[(?:music|applause|laughter|inaudible|♪|\s)*\]|\((?:music|applause|laughter)\)|♪+/gi, ' ')
-    .replace(/\b(?:u+m+|u+h+|e+r+m*|a+h+m*|h+m+|m+hm+|uh-huh)\b[,.…]*/gi, ' ')
-    .replace(/\b(\w+(?:'\w+)?)(?:[,\s]+\1\b){1,}/gi, '$1')            // "I I I think" -> "I think"
-    .replace(/\b(\w+ \w+)(?:[,\s]+\1\b)+/gi, '$1')                    // "going to going to" -> "going to"
-    .replace(/\s+([,.!?;:])/g, '$1')
-    .replace(/([,.!?;:])\1+/g, '$1')
-    .replace(/(^|[.!?]\s+)([a-z])/g, (_, a, b) => a + b.toUpperCase())
-    .replace(/\s{2,}/g, ' ').trim();
-}
-
-// ---------- build paragraphs from segments ----------
-const fmt = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
-function paragraphs(segs) {
-  const out = []; let cur = null, last = 0;
-  for (const s of segs) {
-    const gap = s.start - last;
-    if (!cur || cur.text.length > 600 && /[.!?]$/.test(cur.text) || gap > 4 && cur.text.length > 200) { cur = { start: s.start, text: '' }; out.push(cur); }
-    cur.text += (cur.text ? ' ' : '') + s.text; last = s.start;
-  }
-  return out;
-}
-function chunk(blocks, max = 1800) { // group paragraph texts into LLM-sized chunks
-  const chunks = []; let c = [];
-  let len = 0;
-  for (const b of blocks) { if (len + b.text.length > max && c.length) { chunks.push(c); c = []; len = 0; } c.push(b); len += b.text.length; }
-  if (c.length) chunks.push(c);
-  return chunks;
-}
-
 // ---------- render ----------
 function render() {
   if (!data) return;
-  const blocks = cleanedBlocks || rawBlocks();
-  const lines = [`# ${data.title}`, ''];
-  lines.push(`**Channel:** ${data.author || 'unknown'} · **Source:** https://youtu.be/${data.videoId} · **Captions:** ${data.languageName}${data.auto && !/auto/i.test(data.languageName) ? ' (auto-generated)' : ''}`, '');
-  for (const b of blocks) lines.push((($('ts').checked) ? `**[${fmt(b.start)}]** ` : '') + b.text, '');
-  $('md').value = lines.join('\n').trim() + '\n';
+  $('md').value = buildMarkdown(data, cleanedBlocks || rawBlocks(), { timestamps: $('ts').checked });
   $('meta').textContent = data.title;
   $('out').classList.remove('hide');
 }
-function rawBlocks() {
-  const m = mode();
-  return paragraphs(data.segments).map((p) => ({ start: p.start, text: m === 'off' ? p.text : quickClean(p.text) }));
-}
+function rawBlocks() { return toBlocks(data.segments, mode() !== 'off'); }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const wordCount = (t) => (t.match(/\S+/g) || []).length;
-// true when the text ends a sentence ("...", "…" and trailing commas do not count)
-function endsSentence(t) {
-  t = t.trim().replace(/["'”’)\]]+$/, '');
-  return /[.!?]$/.test(t) && !/\.\.\.$/.test(t);
-}
 
 async function askModel(model, text, label) {
   for (let attempt = 0; ; attempt++) {
