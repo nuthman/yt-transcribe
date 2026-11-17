@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YT Transcribe</title>
+<style>
+  :root { --bg:#fafaf9; --fg:#1c1917; --mut:#78716c; --card:#fff; --bd:#e7e5e4; --ac:#c2410c; --acf:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161412; --fg:#f5f5f4; --mut:#a8a29e; --card:#1f1c1a; --bd:#34302d; --ac:#fb923c; --acf:#1c1917; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,system-ui,sans-serif }
+  main { max-width:820px; margin:0 auto; padding:32px 16px 64px }
+  h1 { font-size:22px; margin:0 0 4px } p.sub { color:var(--mut); margin:0 0 20px }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center }
+  input[type=text], input[type=password], select { padding:9px 11px; border:1px solid var(--bd); border-radius:8px; background:var(--card); color:var(--fg); font:inherit }
+  #url { flex:1; min-width:240px }
+  button { padding:9px 16px; border:1px solid var(--bd); border-radius:8px; background:var(--card); color:var(--fg); font:inherit; cursor:pointer }
+  button.primary { background:var(--ac); color:var(--acf); border-color:var(--ac); font-weight:600 }
+  button:disabled { opacity:.5; cursor:default }
+  .opts { margin:14px 0; padding:12px 14px; background:var(--card); border:1px solid var(--bd); border-radius:10px; display:grid; gap:10px }
+  .opts label { display:flex; gap:6px; align-items:center }
+  small, .mut { color:var(--mut) }
+  #status { min-height:22px; margin:10px 0 }
+  #status.err { color:#dc2626 }
+  .bar { display:flex; justify-content:space-between; align-items:center; margin:18px 0 8px }
+  textarea { width:100%; min-height:420px; padding:14px; border:1px solid var(--bd); border-radius:10px; background:var(--card); color:var(--fg); font:14px/1.6 ui-monospace,Menlo,monospace; resize:vertical }
+  .hide { display:none }
+</style>
+</head>
+<body>
+<main>
+  <h1>YT Transcribe</h1>
+  <p class="sub">Paste a YouTube link. Reads the video's own caption track — nothing is downloaded.</p>
+
+  <form class="row" id="form">
+    <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=…" autofocus>
+    <button class="primary" id="go">Transcribe</button>
+  </form>
+
+  <div class="opts">
+    <div class="row">
+      <label>Clean-up
+        <select id="mode">
+          <option value="quick">Quick (remove ums/ahs, stutters)</option>
+          <option value="ai">AI polish (local model)</option>
+          <option value="off">Off (raw captions)</option>
+        </select>
+      </label>
+      <label class="hide" id="modelWrap">Model <select id="model"></select></label>
+      <label><input type="checkbox" id="ts"> Timestamps</label>
+      <label class="hide" id="langWrap">Language <select id="lang"></select></label>
+    </div>
+    <div class="row hide" id="keyWrap">
+      <label>oMLX API key <input type="password" id="key" placeholder="paste key" autocomplete="off"></label>
+      <small>Stored only in this browser; sent to your local server.</small>
+    </div>
+    <small id="backendNote"></small>
+  </div>
+
+  <div id="status" class="mut"></div>
+
+  <section id="out" class="hide">
+    <div class="bar">
+      <strong id="meta"></strong>
+      <span class="row">
+        <button id="copy">Copy markdown</button>
+        <button id="dl">Download .md</button>
+      </span>
+    </div>
+    <textarea id="md" spellcheck="false"></textarea>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : 'mut'; };
+const store = { get: (k) => { try { return localStorage.getItem(k) } catch { return null } }, set: (k, v) => { try { localStorage.setItem(k, v) } catch {} } };
+let data = null, rawText = null, cleanedBlocks = null, running = 0;
+
+$('key').value = store.get('omlxKey') || '';
+$('mode').value = store.get('mode') || 'quick';
+$('ts').checked = store.get('ts') === '1';
+
+// ---------- models ----------
+async function loadModels() {
+  const key = $('key').value.trim();
+  const r = await (await fetch('/api/models', { headers: key ? { 'X-Omlx-Key': key } : {} })).json();
+  const sel = $('model'), prev = store.get('model');
+  sel.innerHTML = '';
+  const add = (backend, names) => names.forEach((n) => {
+    const o = document.createElement('option'); o.value = backend + ':' + n; o.textContent = `${n} (${backend})`; sel.append(o);
+  });
+  const chat = (n) => !/embed|rerank|midi/i.test(n);
+  add('omlx', r.omlx.models.filter(chat)); add('ollama', r.ollama.models.filter(chat));
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  $('keyWrap').classList.toggle('hide', !r.omlx.needsKey);
+  const notes = [];
+  if (r.omlx.needsKey) notes.push('oMLX is running but needs an API key.');
+  if (!sel.options.length) notes.push('No local model found. Start oMLX or Ollama for AI polish.');
+  $('backendNote').textContent = notes.join(' ');
+  updateModelUI();
+}
+function updateModelUI() { $('modelWrap').classList.toggle('hide', $('mode').value !== 'ai' || !$('model').options.length); }
+
+// ---------- quick cleanup (rule based) ----------
+function quickClean(t) {
+  return t
+    .replace(/\[(?:music|applause|laughter|inaudible|♪|\s)*\]|\((?:music|applause|laughter)\)|♪+/gi, ' ')
+    .replace(/\b(?:u+m+|u+h+|e+r+m*|a+h+m*|h+m+|m+hm+|uh-huh)\b[,.…]*/gi, ' ')
+    .replace(/\b(\w+(?:'\w+)?)(?:[,\s]+\1\b){1,}/gi, '$1')            // "I I I think" -> "I think"
+    .replace(/\b(\w+ \w+)(?:[,\s]+\1\b)+/gi, '$1')                    // "going to going to" -> "going to"
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .replace(/([,.!?;:])\1+/g, '$1')
+    .replace(/(^|[.!?]\s+)([a-z])/g, (_, a, b) => a + b.toUpperCase())
+    .replace(/\s{2,}/g, ' ').trim();
+}
+
+// ---------- build paragraphs from segments ----------
+const fmt = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+function paragraphs(segs) {
+  const out = []; let cur = null, last = 0;
+  for (const s of segs) {
+    const gap = s.start - last;
+    if (!cur || cur.text.length > 600 && /[.!?]$/.test(cur.text) || gap > 4 && cur.text.length > 200) { cur = { start: s.start, text: '' }; out.push(cur); }
+    cur.text += (cur.text ? ' ' : '') + s.text; last = s.start;
+  }
+  return out;
+}
+function chunk(blocks, max = 1800) { // group paragraph texts into LLM-sized chunks
+  const chunks = []; let c = [];
+  let len = 0;
+  for (const b of blocks) { if (len + b.text.length > max && c.length) { chunks.push(c); c = []; len = 0; } c.push(b); len += b.text.length; }
+  if (c.length) chunks.push(c);
+  return chunks;
+}
+
+// ---------- render ----------
+function render() {
+  if (!data) return;
+  const blocks = cleanedBlocks || rawBlocks();
+  const lines = [`# ${data.title}`, ''];
+  lines.push(`**Channel:** ${data.author || 'unknown'} · **Source:** https://youtu.be/${data.videoId} · **Captions:** ${data.languageName}${data.auto ? ' (auto-generated)' : ''}`, '');
+  for (const b of blocks) lines.push((($('ts').checked) ? `**[${fmt(b.start)}]** ` : '') + b.text, '');
+  $('md').value = lines.join('\n').trim() + '\n';
+  $('meta').textContent = data.title;
+  $('out').classList.remove('hide');
+}
+function rawBlocks() {
+  const mode = $('mode').value;
+  return paragraphs(data.segments).map((p) => ({ start: p.start, text: mode === 'off' ? p.text : quickClean(p.text) }));
+}
+
+async function polish(blocks, model) {
+  const groups = chunk(blocks), result = [];
+  for (let i = 0; i < groups.length; i++) {
+    status(`AI polish: part ${i + 1} of ${groups.length}…`);
+    const key = $('key').value.trim();
+    const r = await fetch('/api/clean', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { 'X-Omlx-Key': key } : {}) }, body: JSON.stringify({ model, text: groups[i].map((b) => b.text).join('\n\n') }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Model error');
+    const parts = j.text.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+    const startT = groups[i][0].start, endT = groups[i].at(-1).start;
+    parts.forEach((p, k) => result.push({ start: parts.length > 1 ? startT + (endT - startT) * k / (parts.length - 1) : startT, text: p }));
+    cleanedBlocks = [...result]; render();
+  }
+  return result;
+}
+
+// ---------- main ----------
+async function run(lang) {
+  const url = $('url').value.trim(); if (!url) return;
+  const id = ++running; $('go').disabled = true; cleanedBlocks = null; status('Fetching captions…');
+  try {
+    const r = await fetch('/api/transcript?url=' + encodeURIComponent(url) + (lang ? '&lang=' + lang : ''));
+    const j = await r.json(); if (!r.ok) throw new Error(j.error);
+    if (id !== running) return;
+    data = j;
+    $('lang').innerHTML = j.tracks.map((t) => `<option value="${t.code}">${t.name}${t.auto ? ' (auto)' : ''}</option>`).join('');
+    $('lang').value = j.language; $('langWrap').classList.toggle('hide', j.tracks.length < 2);
+    render(); status(`${j.segments.length} caption lines loaded.`);
+    if ($('mode').value === 'ai' && $('model').value) {
+      cleanedBlocks = [];
+      const out = await polish(rawBlocks(), $('model').value);
+      if (id === running) { cleanedBlocks = out; render(); status('Done — AI polished.'); }
+    } else status('Done.');
+  } catch (e) {
+    status(e.message, true);
+    if (data && $('mode').value === 'ai') { cleanedBlocks = null; render(); }
+  } finally { if (id === running) $('go').disabled = false; }
+}
+
+$('form').addEventListener('submit', (e) => { e.preventDefault(); run(); });
+$('lang').addEventListener('change', () => run($('lang').value));
+$('mode').addEventListener('change', () => { store.set('mode', $('mode').value); updateModelUI(); cleanedBlocks = null; render(); });
+$('model').addEventListener('change', () => store.set('model', $('model').value));
+$('ts').addEventListener('change', () => { store.set('ts', $('ts').checked ? '1' : '0'); render(); });
+$('key').addEventListener('change', () => { store.set('omlxKey', $('key').value.trim()); loadModels(); });
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('md').value); } catch { $('md').select(); document.execCommand('copy'); }
+  $('copy').textContent = 'Copied ✓'; setTimeout(() => $('copy').textContent = 'Copy markdown', 1500);
+});
+$('dl').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([$('md').value], { type: 'text/markdown' }));
+  a.download = (data?.title || 'transcript').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') + '.md'; a.click();
+});
+loadModels();
+</script>
+</body>
+</html>
