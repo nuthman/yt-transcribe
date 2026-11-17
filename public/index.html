@@ -39,39 +39,39 @@
 
   <div class="opts">
     <div class="row">
-      <label>Clean-up
-        <select id="mode">
-          <option value="quick">Quick (remove ums/ahs, stutters)</option>
-          <option value="ai">AI polish (local model)</option>
-          <option value="off">Off (raw captions)</option>
-        </select>
-      </label>
-      <label class="hide" id="modelWrap">Model <select id="model"></select></label>
-      <label class="hide" id="chunkWrap">Send <select id="chunking"><option value="auto">in chunks (auto)</option><option value="whole">whole transcript at once</option></select></label>
       <label><input type="checkbox" id="ts"> Timestamps</label>
+      <label><input type="checkbox" id="quick"> Remove ums, ahs &amp; repeats</label>
       <label class="hide" id="langWrap">Language <select id="lang"></select></label>
+      <button type="button" id="aiBtn" aria-expanded="false">AI polish</button>
     </div>
-    <div class="row hide" id="keyWrap">
-      <label>oMLX API key <input type="password" id="key" placeholder="paste key" autocomplete="off"></label>
-      <small>Stored only in this browser; sent to your local server.</small>
-    </div>
-    <div class="row">
-      <button type="button" id="epBtn">Custom API endpoint…</button>
-      <small id="epState"></small>
-    </div>
-    <div class="hide" id="epPanel" style="display:grid;gap:8px">
+    <div class="hide" id="aiPanel" style="display:grid;gap:10px;border-top:1px solid var(--bd);padding-top:10px">
+      <label><input type="checkbox" id="aiOn"> Use AI polish when I transcribe <small>(the caption text is sent to the model you pick)</small></label>
       <div class="row">
-        <input type="text" id="epUrl" placeholder="https://api.example.com/v1" style="flex:1;min-width:240px" autocomplete="off" spellcheck="false">
-        <input type="password" id="epKey" placeholder="API key (if required)" autocomplete="off">
+        <label class="hide" id="modelWrap">Model <select id="model"></select></label>
+        <label id="chunkWrap">Send <select id="chunking"><option value="auto">in chunks (auto)</option><option value="whole">whole transcript at once</option></select></label>
+      </div>
+      <div class="row hide" id="keyWrap">
+        <label>oMLX API key <input type="password" id="key" placeholder="paste key" autocomplete="off"></label>
+        <small>Stored only in this browser; sent to your local server.</small>
       </div>
       <div class="row">
-        <button type="button" class="primary" id="epConnect">Connect &amp; list models</button>
-        <button type="button" id="epRemove">Remove</button>
-        <button type="button" id="epFree" title="Keyless public service; your transcript text is sent to it">Use free public model (no key)</button>
-        <small>Any OpenAI-compatible server (<code>/v1/models</code> and <code>/v1/chat/completions</code>). The URL and key are kept in this browser only.</small>
+        <button type="button" id="epBtn">Custom API endpoint…</button>
+        <small id="epState"></small>
       </div>
+      <div class="hide" id="epPanel" style="display:grid;gap:8px">
+        <div class="row">
+          <input type="text" id="epUrl" placeholder="https://api.example.com/v1" style="flex:1;min-width:240px" autocomplete="off" spellcheck="false">
+          <input type="password" id="epKey" placeholder="API key (if required)" autocomplete="off">
+        </div>
+        <div class="row">
+          <button type="button" class="primary" id="epConnect">Connect &amp; list models</button>
+          <button type="button" id="epRemove">Remove</button>
+          <button type="button" id="epFree" title="Keyless public service; your transcript text is sent to it">Use free public model (no key)</button>
+          <small>Any OpenAI-compatible server (<code>/v1/models</code> and <code>/v1/chat/completions</code>). The URL and key are kept in this browser only.</small>
+        </div>
+      </div>
+      <small id="backendNote"></small>
     </div>
-    <small id="backendNote"></small>
   </div>
 
   <div id="status" class="mut"></div>
@@ -100,10 +100,16 @@ function hdrs() {
   return h;
 }
 const isLocal = (u) => { try { const h = new URL(u).hostname; return /^(localhost|127\.|\[::1\]|.*\.local$)/.test(h); } catch { return true; } };
+// Default: plain captions -> markdown. Quick cleanup and AI polish are opt-in.
+const mode = () => ($('aiOn').checked ? 'ai' : $('quick').checked ? 'quick' : 'off');
+let modelsLoaded = false;
+function ensureModels() { if (!modelsLoaded) { modelsLoaded = true; loadModels(); } }
+function refreshAiBtn() { const on = mode() === 'ai'; $('aiBtn').textContent = on ? 'AI polish · on' : 'AI polish'; $('aiBtn').classList.toggle('primary', on); }
 let data = null, rawText = null, cleanedBlocks = null, running = 0;
 
 $('key').value = store.get('omlxKey') || '';
-$('mode').value = store.get('mode') || 'quick';
+$('quick').checked = store.get('quick') === '1';
+$('aiOn').checked = store.get('aiOn') === '1';
 $('ts').checked = store.get('ts') === '1';
 $('chunking').value = store.get('chunking') || 'auto';
 
@@ -133,7 +139,7 @@ async function loadModels() {
   $('backendNote').textContent = notes.join(' ');
   updateModelUI();
 }
-function updateModelUI() { const ai = $('mode').value === 'ai'; $('modelWrap').classList.toggle('hide', !ai || !$('model').options.length); $('chunkWrap').classList.toggle('hide', !ai); }
+function updateModelUI() { $('modelWrap').classList.toggle('hide', !$('model').options.length); refreshAiBtn(); }
 
 // ---------- quick cleanup (rule based) ----------
 function quickClean(t) {
@@ -179,8 +185,8 @@ function render() {
   $('out').classList.remove('hide');
 }
 function rawBlocks() {
-  const mode = $('mode').value;
-  return paragraphs(data.segments).map((p) => ({ start: p.start, text: mode === 'off' ? p.text : quickClean(p.text) }));
+  const m = mode();
+  return paragraphs(data.segments).map((p) => ({ start: p.start, text: m === 'off' ? p.text : quickClean(p.text) }));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -244,7 +250,7 @@ async function run(lang) {
     $('lang').innerHTML = j.tracks.map((t) => `<option value="${t.code}">${t.name}${t.auto && !/auto/i.test(t.name) ? ' (auto)' : ''}</option>`).join('');
     $('lang').value = j.language; $('langWrap').classList.toggle('hide', j.tracks.length < 2);
     render(); status(`${j.segments.length} caption lines loaded.`);
-    if ($('mode').value === 'ai' && $('model').value) {
+    if (mode() === 'ai' && $('model').value) {
       cleanedBlocks = [];
       const out = await polish(rawBlocks(), $('model').value);
       if (id === running) {
@@ -255,13 +261,21 @@ async function run(lang) {
     } else status('Done.');
   } catch (e) {
     status(e.message, true);
-    if (data && $('mode').value === 'ai') { cleanedBlocks = null; render(); }
+    if (data && mode() === 'ai') { cleanedBlocks = null; render(); }
   } finally { if (id === running) $('go').disabled = false; }
 }
 
 $('form').addEventListener('submit', (e) => { e.preventDefault(); run(); });
 $('lang').addEventListener('change', () => run($('lang').value));
-$('mode').addEventListener('change', () => { store.set('mode', $('mode').value); updateModelUI(); cleanedBlocks = null; render(); });
+$('quick').addEventListener('change', () => { store.set('quick', $('quick').checked ? '1' : '0'); cleanedBlocks = null; render(); });
+$('aiOn').addEventListener('change', () => {
+  store.set('aiOn', $('aiOn').checked ? '1' : '0'); refreshAiBtn(); cleanedBlocks = null; render();
+  if ($('aiOn').checked) { ensureModels(); if (data) status('AI polish is on. Click Transcribe to run it.'); }
+});
+$('aiBtn').addEventListener('click', () => {
+  const open = $('aiPanel').classList.toggle('hide') === false;
+  $('aiBtn').setAttribute('aria-expanded', open); if (open) ensureModels();
+});
 $('chunking').addEventListener('change', () => store.set('chunking', $('chunking').value));
 $('model').addEventListener('change', () => store.set('model', $('model').value));
 $('ts').addEventListener('change', () => { store.set('ts', $('ts').checked ? '1' : '0'); render(); });
@@ -284,7 +298,7 @@ $('epConnect').addEventListener('click', async () => {
   $('epState').textContent = 'Connecting…'; $('epState').className = 'mut';
   await loadModels();
   const first = [...$('model').options].find((o) => o.value.startsWith('custom:'));
-  if (first) { $('model').value = first.value; store.set('model', first.value); $('mode').value = 'ai'; store.set('mode', 'ai'); updateModelUI(); $('epPanel').classList.add('hide'); }
+  if (first) { $('model').value = first.value; store.set('model', first.value); $('aiOn').checked = true; store.set('aiOn', '1'); updateModelUI(); $('epPanel').classList.add('hide'); }
 });
 $('epFree').addEventListener('click', () => {
   if (!confirm('This sends your transcript text to a free third-party service (pollinations.ai). Fine for public videos; do not use it for anything private. Continue?')) return;
@@ -294,7 +308,8 @@ $('epRemove').addEventListener('click', () => {
   ep.url = ep.key = ep.base = ''; ['epUrl', 'epKey', 'epBase'].forEach((k) => store.set(k, ''));
   $('epUrl').value = $('epKey').value = ''; loadModels();
 });
-loadModels();
+refreshAiBtn();
+if ($('aiOn').checked) ensureModels();
 </script>
 </body>
 </html>

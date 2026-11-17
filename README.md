@@ -15,15 +15,14 @@ Open http://localhost:3000, paste a YouTube link, and click **Transcribe**.
 ## How it works
 
 1. **Fetch**: the local server asks YouTube for the video's caption track (manual or auto-generated) and parses it into timed lines. No audio or video is downloaded.
-2. **Clean up**, selectable in the page:
-   - **Off**: raw captions.
-   - **Quick**: instant rule-based cleanup in the browser. Removes um/uh/ah/er/hmm and `[Music]` tags, collapses stutters, fixes spacing and capitalization.
-   - **AI polish**: sends the text in chunks to a local model, which removes filler and false starts, keeps the corrected wording, fixes mis-heard words, and adds punctuation and sentence breaks.
+2. **Clean up** (all optional; by default the captions are converted to markdown as-is, with no AI):
+   - **Remove ums, ahs & repeats**: a checkbox for instant rule-based cleanup in the browser. Removes um/uh/ah/er/hmm and `[Music]` tags, collapses stutters, fixes spacing and capitalization.
+   - **AI polish**: a button that opens a panel. Turn it on, pick a model, and the text is sent to it to remove filler and false starts, keep the corrected wording, fix mis-heard words, and add punctuation and sentence breaks. You can send it in chunks or as one whole transcript.
 3. **Output**: markdown with title, channel, source link and caption language, with optional timestamps. Copy it or download a `.md` file.
 
 ## AI polish backends
 
-The model dropdown lists chat models from whichever of these is running:
+In the AI polish panel, the model dropdown lists chat models from whichever of these is running. You can also paste your own OpenAI-compatible endpoint URL (including a cloud one) under **Custom API endpoint**, or use the one-click free public preset (text is sent to a third-party service):
 
 | Backend | Default address | Override | Auth |
 | --- | --- | --- | --- |
